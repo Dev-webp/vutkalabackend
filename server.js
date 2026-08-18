@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import path from "path";
 
 import authRoutes from "./src/routes/auth.js";
 import adminRoutes from "./src/routes/admin.js";
@@ -13,6 +14,7 @@ import jobSeekerProfileRoutes from "./src/routes/jobSeekerProfileRoutes.js";
 import candidateInterestRoutes from "./src/routes/candidateInterestRoutes.js";
 import hiringRequestRoutes from "./src/routes/hiringRequestRoutes.js";
 import contactRoutes from "./src/routes/contactRoutes.js";
+
 
 dotenv.config();
 
@@ -33,6 +35,13 @@ app.use(express.json());
 
 app.use(cookieParser());
 
+
+app.use(
+  "/uploads",
+  express.static(
+    path.resolve("uploads")
+  )
+);
 // =====================================================
 // ROUTES
 // =====================================================

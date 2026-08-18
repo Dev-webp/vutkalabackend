@@ -1,6 +1,10 @@
 import express from "express";
 import pool from "../config/db.js";
 
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+
 import {
   authenticateUser,
   requireRole,
@@ -8,6 +12,294 @@ import {
 
 const router = express.Router();
 
+
+// =====================================================
+// RESUME UPLOAD CONFIGURATION
+// =====================================================
+
+const resumeUploadPath = path.resolve(
+  "uploads/resumes"
+);
+
+if (!fs.existsSync(resumeUploadPath)) {
+  fs.mkdirSync(resumeUploadPath, {
+    recursive: true,
+  });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, resumeUploadPath);
+  },
+
+  filename: (req, file, cb) => {
+    const extension =
+      path.extname(file.originalname);
+
+    const uniqueName =
+      `${Date.now()}-${Math.random()
+        .toString(36)
+        .substring(2, 10)}${extension}`;
+
+    cb(null, uniqueName);
+  },
+});
+
+const uploadResume = multer({
+  storage,
+
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+  },
+
+  fileFilter: (req, file, cb) => {
+    const allowedExtensions = [
+      ".pdf",
+      ".doc",
+      ".docx",
+    ];
+
+    const extension = path
+      .extname(file.originalname)
+      .toLowerCase();
+
+    if (!allowedExtensions.includes(extension)) {
+      return cb(
+        new Error(
+          "Only PDF, DOC and DOCX files are allowed."
+        )
+      );
+    }
+
+    cb(null, true);
+  },
+});
+
+
+// =====================================================
+// UPDATE APPLICATION STATUS
+// PUT /api/applications/:id/status
+// RECRUITER / ADMIN
+// =====================================================
+
+router.put(
+  "/:id/status",
+  authenticateUser,
+  requireRole("RECRUITER", "ADMIN"),
+  async (req, res) => {
+    try {
+
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const allowedStatuses = [
+        "NEW",
+        "SHORTLISTED",
+        "INTERVIEW",
+        "SELECTED",
+        "REJECTED",
+      ];
+
+      // Validate status
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid application status.",
+        });
+      }
+
+      // =================================================
+      // CHECK APPLICATION
+      // =================================================
+
+      const applicationResult = await pool.query(
+        `
+        SELECT
+          a.id,
+          a.job_id,
+          j.created_by
+        FROM applications a
+        INNER JOIN jobs j
+          ON a.job_id = j.id
+        WHERE a.id = $1
+        `,
+        [id]
+      );
+
+      if (applicationResult.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Application not found.",
+        });
+      }
+
+      const application =
+        applicationResult.rows[0];
+
+      // =================================================
+      // RECRUITER CAN ONLY UPDATE THEIR OWN JOB
+      // =================================================
+
+      if (
+        req.user.role === "RECRUITER" &&
+        application.created_by !== req.user.id
+      ) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "You are not allowed to update this application.",
+        });
+      }
+
+      // =================================================
+      // UPDATE STATUS
+      // =================================================
+
+      const result = await pool.query(
+        `
+        UPDATE applications
+        SET
+          status = $1,
+          updated_at = NOW()
+        WHERE id = $2
+        RETURNING
+          id,
+          status,
+          updated_at
+        `,
+        [status, id]
+      );
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Application status updated successfully.",
+        application: result.rows[0],
+      });
+
+    } catch (error) {
+
+      console.error(
+        "Update application status error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "Server Error.",
+      });
+    }
+  }
+);
+
+import axios from "axios";
+
+const applicationsApi = axios.create({
+  baseURL: "/api/applications",
+  withCredentials: true,
+});
+
+
+// =====================================================
+// APPLY FOR JOB
+// =====================================================
+
+export const applyForJob = async (data) => {
+
+  const formData = new FormData();
+
+  formData.append(
+    "job_id",
+    data.job_id
+  );
+
+  if (data.cover_letter) {
+
+    formData.append(
+      "cover_letter",
+      data.cover_letter
+    );
+
+  }
+
+  if (data.resume) {
+
+    formData.append(
+      "resume",
+      data.resume
+    );
+
+  }
+
+  return await applicationsApi.post(
+    "/",
+    formData
+  );
+
+};
+
+
+// =====================================================
+// GET MY APPLICATIONS
+// =====================================================
+
+export const getMyApplications = async () => {
+
+  return await applicationsApi.get(
+    "/my"
+  );
+
+};
+
+
+// =====================================================
+// GET RECRUITER APPLICATIONS
+// =====================================================
+
+export const getRecruiterApplications = async () => {
+
+  return await applicationsApi.get(
+    "/recruiter"
+  );
+
+};
+
+
+// =====================================================
+// VIEW RESUME
+// =====================================================
+
+export const viewResume = async (
+  applicationId
+) => {
+
+  return await applicationsApi.get(
+    `/${applicationId}/resume`,
+    {
+      responseType: "blob",
+    }
+  );
+
+};
+
+
+// =====================================================
+// UPDATE APPLICATION STATUS
+// =====================================================
+
+export const updateApplicationStatus = async (
+  applicationId,
+  status
+) => {
+
+  return await applicationsApi.put(
+    `/${applicationId}/status`,
+    {
+      status,
+    }
+  );
+
+};
 
 // =====================================================
 // APPLY FOR JOB
@@ -19,38 +311,48 @@ router.post(
   "/",
   authenticateUser,
   requireRole("JOB_SEEKER"),
+  uploadResume.single("resume"),
   async (req, res) => {
+
     try {
-      const candidateId = req.user.id;
 
       const {
         job_id,
-        resume_url,
         cover_letter,
       } = req.body;
 
+      const candidateId = req.user.id;
+
+      console.log(
+        "📝 APPLY FOR JOB:",
+        {
+          candidateId,
+          job_id,
+          hasResume: !!req.file,
+        }
+      );
 
       // =================================================
-      // VALIDATE JOB ID
+      // VALIDATE JOB
       // =================================================
 
       if (!job_id) {
+
         return res.status(400).json({
           success: false,
           message: "Job ID is required.",
         });
+
       }
 
-
       // =================================================
-      // CHECK JOB
+      // CHECK JOB EXISTS
       // =================================================
 
       const jobResult = await pool.query(
         `
         SELECT
           id,
-          title,
           status
         FROM jobs
         WHERE id = $1
@@ -58,45 +360,43 @@ router.post(
         [job_id]
       );
 
-
       if (jobResult.rows.length === 0) {
+
         return res.status(404).json({
           success: false,
           message: "Job not found.",
         });
+
       }
 
-
-      const job = jobResult.rows[0];
-
-
       // =================================================
-      // ONLY OPEN JOBS CAN RECEIVE APPLICATIONS
+      // CHECK JOB IS OPEN
       // =================================================
 
-      if (job.status !== "OPEN") {
+      if (
+        jobResult.rows[0].status &&
+        jobResult.rows[0].status !== "OPEN"
+      ) {
+
         return res.status(400).json({
           success: false,
           message:
             "This job is no longer accepting applications.",
         });
+
       }
 
-
       // =================================================
-      // CHECK DUPLICATE APPLICATION
+      // PREVENT DUPLICATE APPLICATION
       // =================================================
 
       const existingApplication =
         await pool.query(
           `
-          SELECT
-            id,
-            status,
-            applied_at
+          SELECT id
           FROM applications
           WHERE job_id = $1
-            AND candidate_id = $2
+          AND candidate_id = $2
           `,
           [
             job_id,
@@ -104,19 +404,35 @@ router.post(
           ]
         );
 
-
       if (
         existingApplication.rows.length > 0
       ) {
+
         return res.status(409).json({
           success: false,
           message:
             "You have already applied for this job.",
-          application:
-            existingApplication.rows[0],
         });
+
       }
 
+      // =================================================
+      // RESUME
+      // =================================================
+
+      let resumeUrl = null;
+
+      if (req.file) {
+
+        resumeUrl =
+          `/uploads/resumes/${req.file.filename}`;
+
+        console.log(
+          "📄 RESUME SAVED:",
+          resumeUrl
+        );
+
+      }
 
       // =================================================
       // CREATE APPLICATION
@@ -124,8 +440,7 @@ router.post(
 
       const result = await pool.query(
         `
-        INSERT INTO applications
-        (
+        INSERT INTO applications (
           job_id,
           candidate_id,
           resume_url,
@@ -134,8 +449,7 @@ router.post(
           applied_at,
           updated_at
         )
-        VALUES
-        (
+        VALUES (
           $1,
           $2,
           $3,
@@ -157,15 +471,15 @@ router.post(
         [
           job_id,
           candidateId,
-          resume_url || null,
+          resumeUrl,
           cover_letter || null,
         ]
       );
 
-
-      // =================================================
-      // SUCCESS
-      // =================================================
+      console.log(
+        "✅ APPLICATION CREATED:",
+        result.rows[0]
+      );
 
       return res.status(201).json({
         success: true,
@@ -175,37 +489,69 @@ router.post(
           result.rows[0],
       });
 
-
     } catch (error) {
 
       console.error(
-        "Apply for job error:",
+        "❌ Apply for job error:",
         error
       );
-
-
-      // Handle database unique constraint
-      // in case two requests arrive together.
-
-      if (
-        error.code === "23505"
-      ) {
-        return res.status(409).json({
-          success: false,
-          message:
-            "You have already applied for this job.",
-        });
-      }
-
 
       return res.status(500).json({
         success: false,
         message:
-          "Server Error",
+          "Failed to submit application.",
       });
+
     }
+
   }
 );
+// =====================================================
+// APPLY FOR JOB
+// POST /api/applications
+// JOB SEEKER ONLY
+// =====================================================
+
+router.use((error, req, res, next) => {
+
+  console.error(
+    "APPLICATION UPLOAD ERROR:",
+    error
+  );
+
+  if (error instanceof multer.MulterError) {
+
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Resume must be 5 MB or smaller.",
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      message:
+        error.message ||
+        "Resume upload failed.",
+    });
+  }
+
+
+  if (error) {
+
+    return res.status(400).json({
+      success: false,
+      message:
+        error.message ||
+        "Resume upload failed.",
+    });
+
+  }
+
+  next();
+
+});
 
 
 // =====================================================
@@ -309,6 +655,132 @@ router.get(
 // GET /api/applications/recruiter
 // RECRUITER / ADMIN
 // =====================================================
+
+router.get(
+  "/:id/resume",
+  authenticateUser,
+  requireRole("RECRUITER", "ADMIN"),
+  async (req, res) => {
+
+    console.log(
+      "🔥 VIEW RESUME ROUTE HIT:",
+      req.params.id
+    );
+
+    try {
+
+      const { id } = req.params;
+
+      const result = await pool.query(
+        `
+        SELECT resume_url
+        FROM applications
+        WHERE id = $1
+        `,
+        [id]
+      );
+
+      console.log(
+        "📌 DATABASE RESULT:",
+        result.rows
+      );
+
+      if (result.rows.length === 0) {
+
+        console.log(
+          "❌ APPLICATION NOT FOUND"
+        );
+
+        return res.status(404).json({
+          success: false,
+          message: "Application not found.",
+        });
+      }
+
+      const resumeUrl =
+        result.rows[0].resume_url;
+
+      console.log(
+        "📄 RESUME URL:",
+        resumeUrl
+      );
+
+      if (!resumeUrl) {
+
+        console.log(
+          "❌ RESUME URL IS EMPTY"
+        );
+
+        return res.status(404).json({
+          success: false,
+          message: "Resume not found.",
+        });
+      }
+
+      const cleanPath =
+        resumeUrl.replace(/^\/+/, "");
+
+      const filePath =
+        path.resolve(
+          process.cwd(),
+          cleanPath
+        );
+
+      console.log(
+        "📂 CLEAN PATH:",
+        cleanPath
+      );
+
+      console.log(
+        "📂 FULL FILE PATH:",
+        filePath
+      );
+
+      const fileExists =
+        fs.existsSync(filePath);
+
+      console.log(
+        "📁 FILE EXISTS:",
+        fileExists
+      );
+
+      if (!fileExists) {
+
+        console.log(
+          "❌ RESUME FILE DOES NOT EXIST"
+        );
+
+        return res.status(404).json({
+          success: false,
+          message:
+            "Resume file does not exist on server.",
+          resumeUrl,
+          filePath,
+        });
+      }
+
+      console.log(
+        "✅ SENDING RESUME:",
+        filePath
+      );
+
+      return res.sendFile(filePath);
+
+    } catch (error) {
+
+      console.error(
+        "❌ VIEW RESUME ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "Server Error.",
+      });
+    }
+  }
+);
+
 
 router.get(
   "/recruiter",
