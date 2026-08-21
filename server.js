@@ -14,6 +14,9 @@ import jobSeekerProfileRoutes from "./src/routes/jobSeekerProfileRoutes.js";
 import candidateInterestRoutes from "./src/routes/candidateInterestRoutes.js";
 import hiringRequestRoutes from "./src/routes/hiringRequestRoutes.js";
 import contactRoutes from "./src/routes/contactRoutes.js";
+import candidatesRoutes from "./src/routes/candidates.js";
+import adminCandidatesRoutes from  "./src/routes/adminCandidatesRoutes.js";
+
 
 
 dotenv.config();
@@ -26,7 +29,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: "http://localhost:5173 ||https://vutkalaglobal.com/ ",
     credentials: true,
   })
 );
@@ -98,6 +101,17 @@ app.use(
   candidateInterestRoutes
 );
 
+
+app.use(
+  "/api/admin/candidates",
+  adminCandidatesRoutes
+);
+
+
+app.use(
+  "/api/candidates",
+  candidatesRoutes
+);
 // =====================================================
 // TEST ROUTE
 // =====================================================

@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../config/db.js";
+import axios from "axios";
 
 import multer from "multer";
 import path from "path";
@@ -10,6 +11,11 @@ import {
   requireRole,
 } from "../middleware/authMiddleware.js";
 
+
+
+import {
+  sendApplicationStatusEmail,
+} from "../services/applicationEmailService.js";
 const router = express.Router();
 
 
@@ -82,117 +88,7 @@ const uploadResume = multer({
 // RECRUITER / ADMIN
 // =====================================================
 
-router.put(
-  "/:id/status",
-  authenticateUser,
-  requireRole("RECRUITER", "ADMIN"),
-  async (req, res) => {
-    try {
 
-      const { id } = req.params;
-      const { status } = req.body;
-
-      const allowedStatuses = [
-        "NEW",
-        "SHORTLISTED",
-        "INTERVIEW",
-        "SELECTED",
-        "REJECTED",
-      ];
-
-      // Validate status
-      if (!allowedStatuses.includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid application status.",
-        });
-      }
-
-      // =================================================
-      // CHECK APPLICATION
-      // =================================================
-
-      const applicationResult = await pool.query(
-        `
-        SELECT
-          a.id,
-          a.job_id,
-          j.created_by
-        FROM applications a
-        INNER JOIN jobs j
-          ON a.job_id = j.id
-        WHERE a.id = $1
-        `,
-        [id]
-      );
-
-      if (applicationResult.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Application not found.",
-        });
-      }
-
-      const application =
-        applicationResult.rows[0];
-
-      // =================================================
-      // RECRUITER CAN ONLY UPDATE THEIR OWN JOB
-      // =================================================
-
-      if (
-        req.user.role === "RECRUITER" &&
-        application.created_by !== req.user.id
-      ) {
-        return res.status(403).json({
-          success: false,
-          message:
-            "You are not allowed to update this application.",
-        });
-      }
-
-      // =================================================
-      // UPDATE STATUS
-      // =================================================
-
-      const result = await pool.query(
-        `
-        UPDATE applications
-        SET
-          status = $1,
-          updated_at = NOW()
-        WHERE id = $2
-        RETURNING
-          id,
-          status,
-          updated_at
-        `,
-        [status, id]
-      );
-
-      return res.status(200).json({
-        success: true,
-        message:
-          "Application status updated successfully.",
-        application: result.rows[0],
-      });
-
-    } catch (error) {
-
-      console.error(
-        "Update application status error:",
-        error
-      );
-
-      return res.status(500).json({
-        success: false,
-        message: "Server Error.",
-      });
-    }
-  }
-);
-
-import axios from "axios";
 
 const applicationsApi = axios.create({
   baseURL: "/api/applications",
@@ -651,6 +547,220 @@ router.get(
 
 
 // =====================================================
+// UPDATE APPLICATION STATUS
+// PUT /api/applications/:id/status
+// RECRUITER / ADMIN
+// =====================================================
+
+// =====================================================
+// UPDATE APPLICATION STATUS
+// PUT /api/applications/:id/status
+// RECRUITER / ADMIN
+// =====================================================
+
+router.put(
+  "/:id/status",
+  authenticateUser,
+  requireRole("RECRUITER", "ADMIN"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      console.log("======================================");
+      console.log("📌 UPDATE APPLICATION STATUS");
+      console.log("Application ID:", id);
+      console.log("New Status:", status);
+      console.log("======================================");
+
+      // =====================================================
+      // ALLOWED STATUSES
+      // =====================================================
+
+      const allowedStatuses = [
+        "NEW",
+        "SHORTLISTED",
+        "INTERVIEW",
+        "SELECTED",
+        "REJECTED",
+      ];
+
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid application status.",
+        });
+      }
+
+      // =====================================================
+      // GET APPLICATION + CANDIDATE + JOB
+      // =====================================================
+
+      const applicationResult = await pool.query(
+        `
+        SELECT
+          a.id,
+          a.job_id,
+          a.candidate_id,
+          a.status AS old_status,
+
+          j.created_by,
+          j.title AS job_title,
+
+          u.full_name AS candidate_name,
+          u.email AS candidate_email
+
+        FROM applications a
+
+        INNER JOIN jobs j
+          ON a.job_id = j.id
+
+        INNER JOIN auth_users u
+          ON a.candidate_id = u.id
+
+        WHERE a.id = $1
+        `,
+        [id]
+      );
+
+      // =====================================================
+      // APPLICATION NOT FOUND
+      // =====================================================
+
+      if (applicationResult.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Application not found.",
+        });
+      }
+
+      const application = applicationResult.rows[0];
+
+      console.log("📌 APPLICATION DATA:");
+      console.log({
+        candidateName: application.candidate_name,
+        candidateEmail: application.candidate_email,
+        jobTitle: application.job_title,
+        oldStatus: application.old_status,
+        newStatus: status,
+      });
+
+      // =====================================================
+      // RECRUITER PERMISSION
+      // =====================================================
+
+      if (
+        req.user.role === "RECRUITER" &&
+        String(application.created_by) !== String(req.user.id)
+      ) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "You can only manage applications for your own jobs.",
+        });
+      }
+
+      // =====================================================
+      // UPDATE STATUS
+      // =====================================================
+
+      const result = await pool.query(
+        `
+        UPDATE applications
+
+        SET
+          status = $1,
+          updated_at = NOW()
+
+        WHERE id = $2
+
+        RETURNING
+          id,
+          job_id,
+          candidate_id,
+          resume_url,
+          cover_letter,
+          status,
+          applied_at,
+          updated_at
+        `,
+        [status, id]
+      );
+
+      console.log(
+        "✅ APPLICATION STATUS UPDATED:",
+        result.rows[0]
+      );
+
+      // =====================================================
+      // SEND EMAIL
+      // =====================================================
+
+      if (
+        ["SHORTLISTED", "INTERVIEW", "SELECTED", "REJECTED"].includes(
+          status
+        )
+      ) {
+        console.log("📧 EMAIL REQUIRED FOR STATUS:", status);
+
+        if (!application.candidate_email) {
+          console.error(
+            "❌ CANDIDATE EMAIL NOT FOUND"
+          );
+        } else {
+          try {
+            console.log(
+              "📧 SENDING EMAIL TO:",
+              application.candidate_email
+            );
+
+            await sendApplicationStatusEmail({
+              email: application.candidate_email,
+              candidateName:
+                application.candidate_name || "Candidate",
+              jobTitle:
+                application.job_title || "Job Position",
+              status,
+            });
+
+            console.log(
+              "✅ APPLICATION STATUS EMAIL SENT SUCCESSFULLY"
+            );
+          } catch (emailError) {
+            console.error(
+              "❌ APPLICATION STATUS EMAIL FAILED"
+            );
+
+            console.error(emailError);
+          }
+        }
+      }
+
+      // =====================================================
+      // RESPONSE
+      // =====================================================
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Application status updated successfully.",
+        application: result.rows[0],
+      });
+
+    } catch (error) {
+      console.error(
+        "❌ Update application status error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "Server Error",
+      });
+    }
+  }
+);
+// =====================================================
 // GET RECRUITER APPLICATIONS
 // GET /api/applications/recruiter
 // RECRUITER / ADMIN
@@ -916,161 +1026,7 @@ router.get(
 // RECRUITER / ADMIN
 // =====================================================
 
-router.put(
-  "/:id/status",
-  authenticateUser,
-  requireRole("RECRUITER", "ADMIN"),
-  async (req, res) => {
-    try {
 
-      const {
-        id,
-      } = req.params;
-
-      const {
-        status,
-      } = req.body;
-
-
-      // =================================================
-      // ALLOWED STATUSES
-      // =================================================
-
-      const allowedStatuses = [
-        "NEW",
-        "SHORTLISTED",
-        "INTERVIEW",
-        "SELECTED",
-        "REJECTED",
-      ];
-
-
-      if (
-        !allowedStatuses.includes(
-          status
-        )
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Invalid application status.",
-        });
-      }
-
-
-      // =================================================
-      // FIND APPLICATION
-      // =================================================
-
-      const applicationResult =
-        await pool.query(
-          `
-          SELECT
-            a.id,
-            a.job_id,
-            j.created_by
-          FROM applications a
-
-          INNER JOIN jobs j
-            ON a.job_id = j.id
-
-          WHERE a.id = $1
-          `,
-          [id]
-        );
-
-
-      if (
-        applicationResult.rows.length === 0
-      ) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Application not found.",
-        });
-      }
-
-
-      const application =
-        applicationResult.rows[0];
-
-
-      // =================================================
-      // RECRUITER CAN ONLY UPDATE
-      // APPLICATIONS FOR THEIR JOBS
-      // =================================================
-
-      if (
-        req.user.role === "RECRUITER" &&
-        application.created_by !==
-          req.user.id
-      ) {
-
-        return res.status(403).json({
-          success: false,
-          message:
-            "You can only manage applications for your own jobs.",
-        });
-
-      }
-
-
-      // =================================================
-      // UPDATE
-      // =================================================
-
-      const result = await pool.query(
-        `
-        UPDATE applications
-
-        SET
-          status = $1,
-          updated_at = NOW()
-
-        WHERE id = $2
-
-        RETURNING
-          id,
-          job_id,
-          candidate_id,
-          resume_url,
-          cover_letter,
-          status,
-          applied_at,
-          updated_at
-        `,
-        [
-          status,
-          id,
-        ]
-      );
-
-
-      return res.status(200).json({
-        success: true,
-        message:
-          "Application status updated successfully.",
-        application:
-          result.rows[0],
-      });
-
-
-    } catch (error) {
-
-      console.error(
-        "Update application status error:",
-        error
-      );
-
-
-      return res.status(500).json({
-        success: false,
-        message:
-          "Server Error",
-      });
-    }
-  }
-);
 
 
 export default router;
