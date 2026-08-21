@@ -11,6 +11,57 @@ const router = express.Router();
 
 /*
 =========================================================
+GET ALL USERS
+GET /api/admin/users
+=========================================================
+*/
+
+router.get(
+  "/users",
+  authenticateUser,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `
+        SELECT
+          id,
+          full_name,
+          email,
+          phone,
+          role,
+          status,
+          is_email_verified,
+          profile_image,
+          organization_id,
+          created_at,
+          updated_at
+        FROM auth_users
+        ORDER BY created_at DESC
+        `
+      );
+
+      return res.status(200).json({
+        success: true,
+        count: result.rows.length,
+        users: result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "Get admin users error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "Server Error",
+      });
+    }
+  }
+);
+
+/*
+=========================================================
 GET PENDING RECRUITERS
 GET /api/admin/recruiters/pending
 =========================================================
